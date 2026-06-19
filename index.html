@@ -229,22 +229,13 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ── Supabase config (REST API directly, no SDK dependency) ──
-var SUPABASE_URL = 'https://bqkjhwrdkizdloiowioe.supabase.co';
-var SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxa2pod3Jka2l6ZGxvaW93aW9lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4MzY5ODIsImV4cCI6MjA5NzQxMjk4Mn0.qoxwgJj-9q6umT5C-rB2NHmoQg1wHESNHN5l7FeP-nI';
-var DEAL_ID = 'demo-deal-1';
+// ── Mock persistence: localStorage only, no backend ──
+// State is stored in the browser and synced live across tabs via the
+// `storage` event, so opening Exporter view + Importer view in two tabs
+// behaves like a real two-sided deal.
+var STORAGE_KEY = 'maks_deal_state_v1';
 
-function apiHeaders(extra){
-  var h = {
-    'apikey': SUPABASE_KEY,
-    'Authorization': 'Bearer ' + SUPABASE_KEY,
-    'Content-Type': 'application/json'
-  };
-  if(extra) Object.assign(h, extra);
-  return h;
-}
-
-console.log('[MAKS] Ready, using REST API');
+console.log('[MAKS] Ready — running in local mock mode (no database)');
 
 // ── Step definitions ──
 const STEPS = [
@@ -258,84 +249,97 @@ const STEPS = [
   {id:9, lane:'exporter', who:'Exporter', what:'Proceed shipping', holder:'IDRX (escrow)', detail:'ship'},
   {id:10, lane:'importer', who:'Importer', what:'Confirm items', holder:'IDRX (escrow)', detail:'confirm'},
   {id:11, lane:'icc', who:'ICC', what:'Release funds', holder:'IDRX (exporter)', detail:'release'},
-  {id:12, lane:'exporter', who:'Exporter', what:'Receive funds (IDRX) in PAKD', holder:'IDRX (exporter)', detail:'receive'},
+  {id:12, lane:'exporter', who:'Exporter', what:'Receive funds (IDRX) in MAKS', holder:'IDRX (exporter)', detail:'receive'},
   {id:13, lane:'exporter', who:'Exporter', what:'Withdraw IDRX to IDR', holder:'IDR (exporter)', detail:'sell'},
   {id:14, lane:'exporter', who:'Exporter', what:'Receive IDR in bank', holder:'IDR (bank)', detail:'bank'},
 ];
+
+// ── Static deal facts (the mock "deal on file") ──
+const DEAL = {
+  ref: 'MAKS-LC-0042',
+  product: 'Robusta Coffee Beans — Grade 1',
+  quantity: 18000,
+  unit: 'kg',
+  unitPrice: 2.85,            // USD per kg
+  rate: 16200,               // IDR per USD (1 IDRX = 1 IDR)
+  exporterName: 'Nusantara Agro Export',
+  exporterCountry: 'Indonesia',
+  importerName: 'Pacific Foods Trading Co.',
+  importerCountry: 'Singapore',
+  escrowRef: 'ESC-2F9A4C7B',
+  lcRef: 'LC-IDN-2026-0042',
+  carrier: 'Maersk Line',
+  tracking: 'MAEU-7741200',
+  pakdWallet: '0x7A3f…0x9C21',
+  bankName: 'Bank Central Asia (BCA)',
+  bankAccount: 'IDR · 521-088-1234',
+  escrowBank: {
+    beneficiary: 'TransFi Pte. Ltd.',
+    bank: 'DBS Bank Ltd, Singapore',
+    account: '003-901-7782',
+    swift: 'DBSSSGSG',
+    address: '12 Marina Boulevard, Singapore 018982',
+  },
+};
+
+// ── Default editable data (overwritten as the user fills forms) ──
+function defaultData(){
+  return {
+    product: DEAL.product,
+    quantity: DEAL.quantity,
+    unitPrice: DEAL.unitPrice,
+    tracking: DEAL.tracking,
+    condition: 'Items received in good condition',
+    docsUploaded: false,
+    proofUploaded: false,
+  };
+}
+
+// ── Derived money values ──
+function dealValueUSD(d){ return (Number(d.quantity)||0) * (Number(d.unitPrice)||0); }
+function idrxAmount(d){ return Math.round(dealValueUSD(d) * DEAL.rate); }
+
+// ── Formatters ──
+function fmtUSD(n){ return 'USD ' + Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function fmtNum(n){ return Number(n).toLocaleString('en-US'); }
+function fmtIDRX(n){ return Number(n).toLocaleString('en-US') + ' IDRX'; }
+function fmtIDR(n){ return 'IDR ' + Number(n).toLocaleString('en-US'); }
 
 // ── Local state ──
 let role = 'exporter';
 let currentStepId = 1;
 let completed = new Set([]);
+let data = defaultData();
 
-// ── Supabase: fetch state ──
-async function loadDealState(){
+// ── Load state from localStorage ──
+function loadDealState(){
   try {
-    var res = await fetch(SUPABASE_URL + '/rest/v1/deal_state?id=eq.' + DEAL_ID + '&select=*', {
-      headers: apiHeaders()
-    });
-    var data = await res.json();
-    if(!res.ok){
-      console.error('Load failed:', res.status, data);
-      showToast('DB load failed (' + res.status + '). Run schema.sql first.', 'error');
-      return;
-    }
-    if(Array.isArray(data) && data.length > 0){
-      var d = data[0];
-      currentStepId = d.current_step_id;
-      completed = new Set(d.completed_steps || []);
+    var raw = localStorage.getItem(STORAGE_KEY);
+    if(raw){
+      var s = JSON.parse(raw);
+      currentStepId = s.current_step_id || 1;
+      completed = new Set(s.completed_steps || []);
+      data = Object.assign(defaultData(), s.data || {});
       console.log('[MAKS] Loaded state: step', currentStepId, 'completed', Array.from(completed));
-      render();
     }
   } catch(e){
     console.error('Load error:', e);
-    showToast('Connection error. Check console.', 'error');
   }
-}
-
-// ── Last known state hash (to skip redundant renders) ──
-let lastStateHash = '';
-
-function stateHash(csid, comp){
-  return csid + '|' + Array.from(comp).sort((a,b)=>a-b).join(',');
-}
-
-function applyRemoteState(data){
-  if(!data) return;
-  const hash = stateHash(data.current_step_id, new Set(data.completed_steps || []));
-  if(hash === lastStateHash) return; // no change
-  lastStateHash = hash;
-  currentStepId = data.current_step_id;
-  completed = new Set(data.completed_steps || []);
   render();
+  return Promise.resolve();
 }
 
-// ── Supabase: save state ──
-async function saveDealState(){
-  var csid = currentStepId;
-  var comp = Array.from(completed);
-
+// ── Save state to localStorage (triggers `storage` event in other tabs) ──
+function saveDealState(silent){
   try {
-    var res = await fetch(SUPABASE_URL + '/rest/v1/deal_state', {
-      method: 'POST',
-      headers: apiHeaders({'Prefer': 'resolution=merge-duplicates'}),
-      body: JSON.stringify({
-        id: DEAL_ID,
-        current_step_id: csid,
-        completed_steps: comp,
-        updated_at: new Date().toISOString()
-      })
-    });
-    if(!res.ok){
-      var err = await res.text();
-      console.error('Save failed:', res.status, err);
-      showToast('Save failed: ' + res.status, 'error');
-      return false;
-    }
-
-    lastStateHash = stateHash(csid, completed);
-    console.log('[MAKS] Saved: step', csid, 'completed', comp);
-    showToast('Saved');
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      current_step_id: currentStepId,
+      completed_steps: Array.from(completed),
+      data: data,
+      updated_at: new Date().toISOString()
+    }));
+    console.log('[MAKS] Saved: step', currentStepId, 'completed', Array.from(completed));
+    if(!silent) showToast('Saved');
     return true;
   } catch(e){
     console.error('Save error:', e);
@@ -344,33 +348,24 @@ async function saveDealState(){
   }
 }
 
-// ── Polling (reliable baseline sync) ──
-var pollTimer = null;
-async function pollDealState(){
+// ── Cross-tab sync: pick up changes made in another tab ──
+window.addEventListener('storage', function(e){
+  if(e.key !== STORAGE_KEY || !e.newValue) return;
   try {
-    var res = await fetch(SUPABASE_URL + '/rest/v1/deal_state?id=eq.' + DEAL_ID + '&select=*', {
-      headers: apiHeaders()
-    });
-    if(!res.ok) return;
-    var data = await res.json();
-    if(Array.isArray(data) && data.length > 0){
-      applyRemoteState(data[0]);
-    }
-  } catch(e){
-    // silent retry
-  }
-}
-
-function startPolling(){
-  pollDealState();
-  pollTimer = setInterval(pollDealState, 1500);
-}
+    var s = JSON.parse(e.newValue);
+    currentStepId = s.current_step_id || 1;
+    completed = new Set(s.completed_steps || []);
+    data = Object.assign(defaultData(), s.data || {});
+    render();
+  } catch(err){ /* ignore */ }
+});
 
 // ── Reset deal (for demo) ──
-async function resetDeal(){
+function resetDeal(){
   currentStepId = 1;
   completed = new Set([]);
-  await saveDealState();
+  data = defaultData();
+  saveDealState(true);
   render();
   showToast('Deal reset to step 1');
 }
@@ -400,32 +395,65 @@ function statusOf(step){
   return 'pending';
 }
 
+// ── Read whatever inputs are present on the current form into `data` ──
+function collectInputs(){
+  var map = {
+    f_product: 'product',
+    f_qty: 'quantity',
+    f_price: 'unitPrice',
+    f_tracking: 'tracking',
+    f_condition: 'condition',
+  };
+  Object.keys(map).forEach(function(id){
+    var el = document.getElementById(id);
+    if(el && el.value !== ''){
+      data[map[id]] = el.value;
+    }
+  });
+  // Counter-offer (importer) overrides the unit price if provided
+  var counter = document.getElementById('f_counter');
+  if(counter && counter.value !== '' && !isNaN(Number(counter.value))){
+    data.unitPrice = Number(counter.value);
+  }
+}
+
+// ── Mock file upload ──
+function mockUpload(flag){
+  data[flag] = true;
+  saveDealState(true);
+  render();
+  showToast('File uploaded');
+}
+
 // ── Advance ──
-async function advance(){
+function advance(){
+  collectInputs();
   completed.add(currentStepId);
   var idx = STEPS.findIndex(function(s){return s.id===currentStepId;});
 
   if(idx < STEPS.length-1){
     currentStepId = STEPS[idx+1].id;
-    var saved = await saveDealState();
-    if(!saved) return;
+    if(!saveDealState()) return;
     render();
 
-    // If next step is ICC, auto-advance after a brief delay
+    // If next step is ICC, auto-advance after a brief delay (escrow automation)
     var nextStep = STEPS[idx+1];
     if(nextStep.lane === 'icc'){
       showToast('ICC processing...');
-      setTimeout(async function(){
+      setTimeout(function(){
         completed.add(currentStepId);
         var nextIdx = STEPS.findIndex(function(s){return s.id===currentStepId;});
         if(nextIdx < STEPS.length-1){
           currentStepId = STEPS[nextIdx+1].id;
-          await saveDealState();
+          saveDealState(true);
           render();
           showToast('ICC step completed');
         }
       }, 1500);
     }
+  } else {
+    saveDealState();
+    showToast('Deal complete 🎉');
   }
 }
 
@@ -463,7 +491,7 @@ function renderMain(){
 
   let header = `
     <div class="deal-header">
-      <div class="eyebrow">Letter of credit · Deal #—</div>
+      <div class="eyebrow">Letter of credit · Deal #${DEAL.ref}</div>
       <h1>${step.what}</h1>
       <div class="sub">${badge(status)} &nbsp;·&nbsp; Step ${step.id} of ${STEPS.length} &nbsp;·&nbsp; Owner: ${step.who}</div>
     </div>`;
@@ -473,7 +501,7 @@ function renderMain(){
   if(isIcc || (!isMine && status!=='current')){
     body = `<div class="card">${otherRoleNotice(step)}</div>`;
     if(isIcc){
-      body = `<div class="card"><h3>${step.what}</h3><div class="meta">Handled automatically by ICC escrow</div>${iccBody(step)}</div>`;
+      body = `<div class="card"><h3>${step.what}</h3><div class="meta">Handled automatically by ICC</div>${iccBody(step)}</div>`;
     }
   } else if(!isMine && status==='current'){
     body = `<div class="card">${otherRoleNotice(step)}</div>`;
@@ -498,126 +526,147 @@ function otherRoleNotice(step){
 function iccBody(step){
   if(step.detail==='request-payment'){
     return `
-      <div class="info-line"><span class="k">Amount due</span><span class="v">—</span></div>
-      <div class="info-line"><span class="k">Converts to</span><span class="v">—</span></div>
-      <div class="info-line"><span class="k">Escrow reference</span><span class="v mono">—</span></div>
+      <div class="info-line"><span class="k">Amount due</span><span class="v">${fmtUSD(dealValueUSD(data))}</span></div>
+      <div class="info-line"><span class="k">Converts to</span><span class="v">${fmtIDRX(idrxAmount(data))}</span></div>
+      <div class="info-line"><span class="k">Escrow reference</span><span class="v mono">${DEAL.escrowRef}</span></div>
       <div class="note">ICC has notified the importer to deposit funds. <b>No action needed from you.</b></div>`;
   }
   if(step.detail==='issue-lc'){
     return `
-      <div class="info-line"><span class="k">Funds confirmed in escrow</span><span class="v">—</span></div>
-      <div class="info-line"><span class="k">LC reference</span><span class="v mono">—</span></div>
+      <div class="info-line"><span class="k">Funds confirmed in escrow</span><span class="v">${fmtIDRX(idrxAmount(data))}</span></div>
+      <div class="info-line"><span class="k">LC reference</span><span class="v mono">${DEAL.lcRef}</span></div>
       <div class="lc-doc-row">
         <div class="file-icon">PDF</div>
-        <div><div class="name">Letter of Credit</div><div class="sub">Issued by ICC</div></div>
+        <div><div class="name">Letter_of_Credit_${DEAL.lcRef}.pdf</div><div class="sub">Issued by ICC · ${DEAL.exporterName}</div></div>
         <div class="spacer"></div>
-        <button class="btn btn-outline btn-sm">Open</button>
-        <button class="btn btn-ghost btn-sm">Download</button>
+        <button class="btn btn-outline btn-sm" onclick="showToast('Opening document…')">Open</button>
+        <button class="btn btn-ghost btn-sm" onclick="showToast('Download started')">Download</button>
       </div>
       <div class="note">Letter of Credit issued to exporter. Shipping can proceed.</div>`;
   }
   if(step.detail==='release'){
     return `
-      <div class="info-line"><span class="k">Items confirmed by importer</span><span class="v">—</span></div>
-      <div class="info-line"><span class="k">Releasing</span><span class="v">—</span></div>
-      <div class="note">Funds released from escrow to exporter's PAKD wallet.</div>`;
+      <div class="info-line"><span class="k">Items confirmed by importer</span><span class="v">Yes — ${data.condition}</span></div>
+      <div class="info-line"><span class="k">Releasing</span><span class="v">${fmtIDRX(idrxAmount(data))}</span></div>
+      <div class="info-line"><span class="k">Destination</span><span class="v mono">${DEAL.pakdWallet}</span></div>
+      <div class="note">Funds released from escrow to exporter's MAKS wallet.</div>`;
   }
   return `<div class="note">Automated escrow step.</div>`;
 }
 
+function uploadedRow(name, sub){
+  return `<div class="file-row">
+    <div class="file-icon" style="background:#1a3a4a;color:var(--teal-2)">PDF</div>
+    <div><div class="name">${name}</div><div class="sub">✓ ${sub}</div></div>
+  </div>`;
+}
+
 function formFor(step){
+  const usd = dealValueUSD(data);
+  const idrx = idrxAmount(data);
   switch(step.detail){
     case 'offer':
       return `
         <label>Product description</label>
-        <textarea placeholder="Enter product description"></textarea>
+        <textarea id="f_product" placeholder="Enter product description">${data.product}</textarea>
         <div class="row2">
-          <div><label>Quantity</label><input type="number" placeholder="Enter quantity"></div>
-          <div><label>Unit price (USD)</label><input type="number" placeholder="Enter unit price"></div>
+          <div><label>Quantity (${DEAL.unit})</label><input id="f_qty" type="number" value="${data.quantity}" placeholder="Enter quantity"></div>
+          <div><label>Unit price (USD)</label><input id="f_price" type="number" step="0.01" value="${data.unitPrice}" placeholder="Enter unit price"></div>
         </div>
-        <div class="actions"><button class="btn btn-primary" onclick="advance()">Send offer</button><button class="btn btn-ghost">Save draft</button></div>`;
+        <div class="info-line"><span class="k">Estimated deal value</span><span class="v">${fmtUSD(usd)}</span></div>
+        <div class="actions"><button class="btn btn-primary" onclick="advance()">Send offer</button><button class="btn btn-ghost" onclick="collectInputs();saveDealState()">Save draft</button></div>`;
     case 'docs':
       return `
         <label>Bill of lading</label>
-        <div class="upload-box"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>
+        ${data.docsUploaded
+          ? uploadedRow('Bill_of_Lading_'+DEAL.tracking+'.pdf', 'Uploaded · 412 KB')
+          : `<div class="upload-box" style="cursor:pointer" onclick="mockUpload('docsUploaded')"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>`}
         <label>Packing list</label>
-        <div class="upload-box"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>
-        <div class="actions"><button class="btn btn-primary" onclick="advance()">Submit documents</button></div>`;
+        ${data.docsUploaded
+          ? uploadedRow('Packing_List_'+DEAL.ref+'.pdf', 'Uploaded · 188 KB')
+          : `<div class="upload-box" style="cursor:pointer" onclick="mockUpload('docsUploaded')"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>`}
+        <div class="actions"><button class="btn btn-primary" onclick="advance()" ${data.docsUploaded?'':'disabled'}>Submit documents</button></div>`;
     case 'request-lc':
       return `
-        <div class="info-line"><span class="k">Deal value</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Importer</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Settlement rail</span><span class="v">—</span></div>
+        <div class="info-line"><span class="k">Deal value</span><span class="v">${fmtUSD(usd)}</span></div>
+        <div class="info-line"><span class="k">Importer</span><span class="v">${DEAL.importerName} · ${DEAL.importerCountry}</span></div>
+        <div class="info-line"><span class="k">Settlement rail</span><span class="v">TransFi → IDRX (ICC)</span></div>
         <label>Notes to ICC (optional)</label>
-        <textarea placeholder="Add context for the escrow request"></textarea>
+        <textarea placeholder="Add context for the request"></textarea>
         <div class="actions"><button class="btn btn-primary" onclick="advance()">Request Letter of Credit</button></div>`;
     case 'deposit':
+      const eb = DEAL.escrowBank;
       return `
-        <div class="info-line"><span class="k">Amount requested</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Escrow reference</span><span class="v mono">—</span></div>
+        <div class="info-line"><span class="k">Amount requested</span><span class="v">${fmtUSD(usd)}</span></div>
+        <div class="info-line"><span class="k">Reference</span><span class="v mono">${DEAL.escrowRef}</span></div>
         <div class="pay-instructions">
           <div class="pay-instructions-head">
             <div class="t">Payment instructions</div>
             <div class="s">via TransFi · transfer the exact amount below</div>
           </div>
-          <div class="info-line"><span class="k">Beneficiary name</span><span class="v">—</span></div>
-          <div class="info-line"><span class="k">Bank name</span><span class="v">—</span></div>
-          <div class="info-line"><span class="k">Account number</span><span class="v mono">—</span></div>
-          <div class="info-line"><span class="k">SWIFT / BIC</span><span class="v mono">—</span></div>
-          <div class="info-line"><span class="k">Bank address</span><span class="v">—</span></div>
-          <div class="info-line"><span class="k">Amount to send</span><span class="v">—</span></div>
-          <div class="info-line"><span class="k">Payment reference</span><span class="v mono">—</span></div>
-          <button class="btn btn-outline btn-sm">Copy bank details</button>
+          <div class="info-line"><span class="k">Beneficiary name</span><span class="v">${eb.beneficiary}</span></div>
+          <div class="info-line"><span class="k">Bank name</span><span class="v">${eb.bank}</span></div>
+          <div class="info-line"><span class="k">Account number</span><span class="v mono">${eb.account}</span></div>
+          <div class="info-line"><span class="k">SWIFT / BIC</span><span class="v mono">${eb.swift}</span></div>
+          <div class="info-line"><span class="k">Bank address</span><span class="v">${eb.address}</span></div>
+          <div class="info-line"><span class="k">Amount to send</span><span class="v">${fmtUSD(usd)}</span></div>
+          <div class="info-line"><span class="k">Payment reference</span><span class="v mono">${DEAL.escrowRef}</span></div>
+          <button class="btn btn-outline btn-sm" onclick="showToast('Bank details copied')">Copy bank details</button>
         </div>
         <label>Deposit method</label>
         <select><option>Bank transfer (SWIFT)</option><option>Local wire</option></select>
         <label>Proof of transfer</label>
-        <div class="upload-box"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>
-        <div class="note">Funds are received via <b>TransFi</b> and converted automatically into IDRX before entering escrow. Always include the payment reference so TransFi can match your transfer.</div>
-        <div class="actions"><button class="btn btn-primary" onclick="advance()">Confirm deposit</button></div>`;
+        ${data.proofUploaded
+          ? uploadedRow('Wire_Receipt_'+DEAL.escrowRef+'.pdf', 'Uploaded · 96 KB')
+          : `<div class="upload-box" style="cursor:pointer" onclick="mockUpload('proofUploaded')"><div class="upload-icon">↑</div><div><div class="t">Upload file</div><div class="s">JPEG, PNG and PDF formats, up to 1MB</div></div></div>`}
+        <div class="note">Funds are received via <b>TransFi</b> and converted automatically into <b>${fmtIDRX(idrx)}</b> before entering escrow. Always include the payment reference so TransFi can match your transfer.</div>
+        <div class="actions"><button class="btn btn-primary" onclick="advance()" ${data.proofUploaded?'':'disabled'}>Confirm deposit</button></div>`;
     case 'confirm':
       return `
-        <div class="info-line"><span class="k">Shipment status</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Items expected</span><span class="v">—</span></div>
+        <div class="info-line"><span class="k">Shipment status</span><span class="v">In transit · ${DEAL.carrier}</span></div>
+        <div class="info-line"><span class="k">Tracking</span><span class="v mono">${data.tracking}</span></div>
+        <div class="info-line"><span class="k">Items expected</span><span class="v">${fmtNum(data.quantity)} ${DEAL.unit} · ${data.product}</span></div>
         <label>Confirm condition</label>
-        <select><option>Items received in good condition</option><option>Items received, discrepancy noted</option></select>
+        <select id="f_condition"><option>Items received in good condition</option><option>Items received, discrepancy noted</option></select>
         <label>Notes (optional)</label>
         <textarea placeholder="Add any notes about the shipment"></textarea>
-        <div class="actions"><button class="btn btn-primary" onclick="advance()">Confirm items received</button><button class="btn btn-outline">Report an issue</button></div>`;
+        <div class="actions"><button class="btn btn-primary" onclick="advance()">Confirm items received</button><button class="btn btn-outline" onclick="showToast('Issue reported to ICC')">Report an issue</button></div>`;
     case 'ship':
       return `
-        <div class="info-line"><span class="k">Letter of Credit</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Carrier</span><span class="v">—</span></div>
+        <div class="info-line"><span class="k">Letter of Credit</span><span class="v mono">${DEAL.lcRef}</span></div>
+        <div class="info-line"><span class="k">Carrier</span><span class="v">${DEAL.carrier}</span></div>
         <label>Tracking number</label>
-        <input type="text" placeholder="Enter tracking number">
+        <input id="f_tracking" type="text" value="${data.tracking}" placeholder="Enter tracking number">
         <div class="actions"><button class="btn btn-primary" onclick="advance()">Mark as shipped</button></div>`;
     case 'receive':
       return `
-        <div class="info-line"><span class="k">Released from escrow</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Destination wallet</span><span class="v mono">—</span></div>
-        <div class="note">Funds have arrived in your PAKD wallet.</div>
+        <div class="info-line"><span class="k">Released from escrow</span><span class="v">${fmtIDRX(idrx)}</span></div>
+        <div class="info-line"><span class="k">Destination wallet</span><span class="v mono">MAKS · ${DEAL.pakdWallet}</span></div>
+        <div class="note">Funds have arrived in your MAKS wallet.</div>
         <div class="actions"><button class="btn btn-primary" onclick="advance()">Continue to sell IDRX</button></div>`;
     case 'sell':
       return `
-        <div class="info-line"><span class="k">Available balance</span><span class="v">—</span></div>
+        <div class="info-line"><span class="k">Available balance</span><span class="v">${fmtIDRX(idrx)}</span></div>
         <label>Amount to sell</label>
-        <input type="text" placeholder="Enter amount">
-        <div class="info-line"><span class="k">Rate</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">You'll receive</span><span class="v">—</span></div>
+        <input type="text" value="${fmtNum(idrx)}" placeholder="Enter amount">
+        <div class="info-line"><span class="k">Rate</span><span class="v">1 IDRX = 1 IDR</span></div>
+        <div class="info-line"><span class="k">You'll receive</span><span class="v">${fmtIDR(idrx)}</span></div>
         <div class="actions"><button class="btn btn-primary" onclick="advance()">Withdraw IDRX</button></div>`;
     case 'bank':
       return `
-        <div class="info-line"><span class="k">Amount</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Bank account</span><span class="v">—</span></div>
-        <div class="info-line"><span class="k">Status</span><span class="v">—</span></div>
-        <div class="note">Withdrawals typically settle within few hours.</div>
+        <div class="info-line"><span class="k">Amount</span><span class="v">${fmtIDR(idrx)}</span></div>
+        <div class="info-line"><span class="k">Bank account</span><span class="v">${DEAL.bankName} · ${DEAL.bankAccount}</span></div>
+        <div class="info-line"><span class="k">Status</span><span class="v">${completed.has(14)?'Settled':'Ready to confirm'}</span></div>
+        <div class="note">Withdrawals typically settle within a few hours.</div>
         <div class="actions"><button class="btn btn-primary" onclick="advance()">Confirm withdrawal to IDR</button></div>`;
     case 'deal':
       return `
-        <div class="info-line"><span class="k">Offer received</span><span class="v">—</span></div>
-        <label>Counter price (optional)</label>
-        <input type="text" placeholder="Leave blank to accept as-is">
-        <div class="actions"><button class="btn btn-primary" onclick="advance()">Accept deal</button><button class="btn btn-outline">Send counter-offer</button></div>`;
+        <div class="info-line"><span class="k">Offer received</span><span class="v">${fmtNum(data.quantity)} ${DEAL.unit} · ${data.product}</span></div>
+        <div class="info-line"><span class="k">Unit price</span><span class="v">${fmtUSD(data.unitPrice)} / ${DEAL.unit}</span></div>
+        <div class="info-line"><span class="k">Total deal value</span><span class="v">${fmtUSD(usd)}</span></div>
+        <label>Counter price per ${DEAL.unit} (optional)</label>
+        <input id="f_counter" type="number" step="0.01" placeholder="Leave blank to accept as-is">
+        <div class="actions"><button class="btn btn-primary" onclick="advance()">Accept deal</button><button class="btn btn-outline" onclick="advance()">Send counter-offer</button></div>`;
     default:
       return `<div class="note">No action required.</div>`;
   }
@@ -630,7 +679,6 @@ function render(){
 
 // ── Init ──
 loadDealState().then(function(){
-  startPolling();
   document.getElementById('connDot').className = 'conn-dot online';
   document.getElementById('connLabel').textContent = 'Live';
 });
